@@ -20,6 +20,7 @@ package event
 import (
 	"context"
 	"fmt"
+	"maps"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -252,9 +253,7 @@ func (list *TargetList) TargetMap() map[TargetID]Target {
 	defer list.RUnlock()
 
 	ntargets := make(map[TargetID]Target, len(list.targets))
-	for k, v := range list.targets {
-		ntargets[k] = v
-	}
+	maps.Copy(ntargets, list.targets)
 	return ntargets
 }
 
@@ -357,7 +356,7 @@ func (list *TargetList) startSendWorkers(workerCount int) {
 	if err != nil {
 		panic(err)
 	}
-	for i := 0; i < workerCount; i++ {
+	for range workerCount {
 		wk.Take()
 		go func() {
 			defer wk.Give()

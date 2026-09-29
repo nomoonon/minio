@@ -25,6 +25,7 @@ import (
 	"net/textproto"
 	"regexp"
 	"strings"
+	"sync/atomic"
 
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio/internal/auth"
@@ -291,7 +292,7 @@ func trimAwsChunkedContentEncoding(contentEnc string) (trimmedContentEnc string)
 		return contentEnc
 	}
 	var newEncs []string
-	for _, enc := range strings.Split(contentEnc, ",") {
+	for enc := range strings.SplitSeq(contentEnc, ",") {
 		if enc != streamingContentEncoding {
 			newEncs = append(newEncs, enc)
 		}
@@ -427,9 +428,31 @@ func errorResponseHandler(w http.ResponseWriter, r *http.Request) {
 			HTTPStatusCode: http.StatusUpgradeRequired,
 		}, r.URL)
 	default:
+		defer logger.AuditLog(r.Context(), w, r, mustGetClaimsFromToken(r))
+		defer atomic.AddUint64(&globalHTTPStats.rejectedRequestsInvalid, 1)
+
+		// When we are not running in S3 Express mode, generate appropriate error
+		// for x-amz-write-offset HEADER specified.
+		if _, ok := r.Header[xhttp.AmzWriteOffsetBytes]; ok {
+			tc, ok := r.Context().Value(mcontext.ContextTraceKey).(*mcontext.TraceCtxt)
+			if ok {
+				tc.FuncName = "s3.AppendObject"
+				tc.ResponseRecorder.LogErrBody = true
+			}
+
+			writeErrorResponse(r.Context(), w, getAPIError(ErrNotImplemented), r.URL)
+			return
+		}
+
+		tc, ok := r.Context().Value(mcontext.ContextTraceKey).(*mcontext.TraceCtxt)
+		if ok {
+			tc.FuncName = "s3.ValidRequest"
+			tc.ResponseRecorder.LogErrBody = true
+		}
+
 		writeErrorResponse(r.Context(), w, APIError{
 			Code: "BadRequest",
-			Description: fmt.Sprintf("An error occurred when parsing the HTTP request %s at '%s'",
+			Description: fmt.Sprintf("An unsupported API call for method: %s at '%s'",
 				r.Method, r.URL.Path),
 			HTTPStatusCode: http.StatusBadRequest,
 		}, r.URL)
@@ -443,7 +466,7 @@ func getHostName(r *http.Request) (hostName string) {
 	} else {
 		hostName = r.Host
 	}
-	return
+	return hostName
 }
 
 // Proxy any request to an endpoint.
@@ -477,5 +500,5 @@ func proxyRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, e
 
 	r.URL.Host = ep.Host
 	f.ServeHTTP(w, r)
-	return
+	return success
 }

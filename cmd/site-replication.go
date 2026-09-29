@@ -26,10 +26,12 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"net/url"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -240,11 +242,9 @@ func (c *SiteReplicationSys) Init(ctx context.Context, objAPI ObjectLayer) error
 		}
 		replLogOnceIf(context.Background(), fmt.Errorf("unable to initialize site replication subsystem: (%w)", err), "site-relication-init")
 
-		duration := time.Duration(r.Float64() * float64(time.Minute))
-		if duration < time.Second {
+		duration := max(time.Duration(r.Float64()*float64(time.Minute)),
 			// Make sure to sleep at least a second to avoid high CPU ticks.
-			duration = time.Second
-		}
+			time.Second)
 		time.Sleep(duration)
 	}
 	c.RLock()
@@ -390,7 +390,7 @@ func (c *SiteReplicationSys) getSiteStatuses(ctx context.Context, sites ...madmi
 			self:         info.DeploymentID == globalDeploymentID(),
 		})
 	}
-	return
+	return psi, err
 }
 
 // AddPeerClusters - add cluster sites for replication configuration.
@@ -720,7 +720,6 @@ func (c *SiteReplicationSys) Netperf(ctx context.Context, duration time.Duration
 	var wg sync.WaitGroup
 	var resultsMu sync.RWMutex
 	for _, info := range infos.Sites {
-		info := info
 		// will call siteNetperf, means call others's adminAPISiteReplicationDevNull
 		if globalDeploymentID() == info.DeploymentID {
 			wg.Add(1)
@@ -757,7 +756,7 @@ func (c *SiteReplicationSys) Netperf(ctx context.Context, duration time.Duration
 		}()
 	}
 	wg.Wait()
-	return
+	return results, err
 }
 
 // GetClusterInfo - returns site replication information.
@@ -2591,17 +2590,17 @@ func (c *SiteReplicationSys) RemoveRemoteTargetsForEndpoint(ctx context.Context,
 		}
 		targets, terr := globalBucketTargetSys.ListBucketTargets(ctx, t.SourceBucket)
 		if terr != nil {
-			return err
+			return terr
 		}
 		tgtBytes, terr := json.Marshal(&targets)
 		if terr != nil {
-			return err
+			return terr
 		}
 		if _, err = globalBucketMetadataSys.Update(ctx, t.SourceBucket, bucketTargetsFile, tgtBytes); err != nil {
 			return err
 		}
 	}
-	return
+	return err
 }
 
 // Other helpers
@@ -2614,12 +2613,11 @@ func getAdminClient(endpoint, accessKey, secretKey string) (*madmin.AdminClient,
 	if globalBucketTargetSys.isOffline(epURL) {
 		return nil, RemoteTargetConnectionErr{Endpoint: epURL.String(), Err: fmt.Errorf("remote target is offline for endpoint %s", epURL.String())}
 	}
-	client, err := madmin.New(epURL.Host, accessKey, secretKey, epURL.Scheme == "https")
-	if err != nil {
-		return nil, err
-	}
-	client.SetCustomTransport(globalRemoteTargetTransport)
-	return client, nil
+	return madmin.NewWithOptions(epURL.Host, &madmin.Options{
+		Creds:     credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure:    epURL.Scheme == "https",
+		Transport: globalRemoteTargetTransport,
+	})
 }
 
 func getS3Client(pc madmin.PeerSite) (*minio.Client, error) {
@@ -2774,7 +2772,7 @@ func (c *SiteReplicationSys) SiteReplicationStatus(ctx context.Context, objAPI O
 		}
 	}
 
-	return
+	return info, err
 }
 
 const (
@@ -2832,9 +2830,7 @@ func (c *SiteReplicationSys) siteReplicationStatus(ctx context.Context, objAPI O
 
 	info.Enabled = true
 	info.Sites = make(map[string]madmin.PeerInfo, len(c.state.Peers))
-	for d, peer := range c.state.Peers {
-		info.Sites[d] = peer
-	}
+	maps.Copy(info.Sites, c.state.Peers)
 	info.UpdatedAt = c.state.UpdatedAt
 
 	var maxBuckets int
@@ -3376,7 +3372,7 @@ func (c *SiteReplicationSys) siteReplicationStatus(ctx context.Context, objAPI O
 	info.MaxGroups = len(groupDescStats)
 	info.MaxPolicies = len(policyStats)
 	info.MaxILMExpiryRules = len(ilmExpiryRuleStats)
-	return
+	return info, err
 }
 
 // isReplicated returns true if count of replicated matches the number of
@@ -3817,9 +3813,7 @@ func (c *SiteReplicationSys) SiteReplicationMetaInfo(ctx context.Context, objAPI
 				info.ILMExpiryRules[opts.EntityValue] = rule
 			}
 		} else {
-			for id, rule := range allRules {
-				info.ILMExpiryRules[id] = rule
-			}
+			maps.Copy(info.ILMExpiryRules, allRules)
 		}
 	}
 	if opts.PeerState {
@@ -3957,9 +3951,7 @@ func (c *SiteReplicationSys) SiteReplicationMetaInfo(ctx context.Context, objAPI
 					return info, errSRBackendIssue(errG)
 				}
 			}
-			for group, d := range groupDescMap {
-				info.GroupDescMap[group] = d
-			}
+			maps.Copy(info.GroupDescMap, groupDescMap)
 		}
 	}
 	// cache SR metadata info for IAM
@@ -5693,11 +5685,8 @@ func isGroupDescEqual(g1, g2 madmin.GroupDesc) bool {
 	}
 	for _, v1 := range g1.Members {
 		var found bool
-		for _, v2 := range g2.Members {
-			if v1 == v2 {
-				found = true
-				break
-			}
+		if slices.Contains(g2.Members, v1) {
+			found = true
 		}
 		if !found {
 			return false
@@ -5717,11 +5706,8 @@ func isUserInfoEqual(u1, u2 madmin.UserInfo) bool {
 	}
 	for _, v1 := range u1.MemberOf {
 		var found bool
-		for _, v2 := range u2.MemberOf {
-			if v1 == v2 {
-				found = true
-				break
-			}
+		if slices.Contains(u2.MemberOf, v1) {
+			found = true
 		}
 		if !found {
 			return false

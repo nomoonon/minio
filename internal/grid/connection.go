@@ -47,7 +47,7 @@ import (
 	"github.com/zeebo/xxh3"
 )
 
-func gridLogIf(ctx context.Context, err error, errKind ...interface{}) {
+func gridLogIf(ctx context.Context, err error, errKind ...any) {
 	logger.LogIf(ctx, "grid", err, errKind...)
 }
 
@@ -55,7 +55,7 @@ func gridLogIfNot(ctx context.Context, err error, ignored ...error) {
 	logger.LogIfNot(ctx, "grid", err, ignored...)
 }
 
-func gridLogOnceIf(ctx context.Context, err error, id string, errKind ...interface{}) {
+func gridLogOnceIf(ctx context.Context, err error, id string, errKind ...any) {
 	logger.LogOnceIf(ctx, "grid", err, id, errKind...)
 }
 
@@ -659,10 +659,7 @@ func (c *Connection) connect() {
 			}
 			sleep := defaultDialTimeout + time.Duration(rng.Int63n(int64(defaultDialTimeout)))
 			next := dialStarted.Add(sleep / 2)
-			sleep = time.Until(next).Round(time.Millisecond)
-			if sleep < 0 {
-				sleep = 0
-			}
+			sleep = max(time.Until(next).Round(time.Millisecond), 0)
 			gotState := c.State()
 			if gotState == StateShutdown {
 				return
@@ -1041,7 +1038,7 @@ func (c *Connection) readStream(ctx context.Context, conn net.Conn, cancel conte
 		// Handle merged messages.
 		messages := int(m.Seq)
 		c.inMessages.Add(int64(messages))
-		for i := 0; i < messages; i++ {
+		for range messages {
 			if atomic.LoadUint32((*uint32)(&c.state)) != StateConnected {
 				return
 			}
@@ -1625,23 +1622,28 @@ func (c *Connection) handleMuxServerMsg(ctx context.Context, m message) {
 			Msg: nil,
 			Err: RemoteErr(m.Payload),
 		})
+		if v.cancelFn != nil {
+			v.cancelFn(RemoteErr(m.Payload))
+		}
 		PutByteBuffer(m.Payload)
-	} else if m.Payload != nil {
+		v.close()
+		c.outgoing.Delete(m.MuxID)
+		return
+	}
+	// Return payload.
+	if m.Payload != nil {
 		v.response(m.Seq, Response{
 			Msg: m.Payload,
 			Err: nil,
 		})
 	}
+	// Close when EOF.
 	if m.Flags&FlagEOF != 0 {
-		if v.cancelFn != nil && m.Flags&FlagPayloadIsErr == 0 {
-			// We must obtain the lock before closing
-			// Otherwise others may pick up the error before close is called.
-			v.respMu.Lock()
-			v.closeLocked()
-			v.respMu.Unlock()
-		} else {
-			v.close()
-		}
+		// We must obtain the lock before closing
+		// Otherwise others may pick up the error before close is called.
+		v.respMu.Lock()
+		v.closeLocked()
+		v.respMu.Unlock()
 		if debugReqs {
 			fmt.Println(m.MuxID, c.String(), "handleMuxServerMsg: DELETING MUX")
 		}

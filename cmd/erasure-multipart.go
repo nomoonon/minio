@@ -322,7 +322,7 @@ func (er erasureObjects) ListMultipartUploads(ctx context.Context, bucket, objec
 		uploads = append(uploads, MultipartInfo{
 			Bucket:    bucket,
 			Object:    object,
-			UploadID:  base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%s.%s", globalDeploymentID(), uploadID))),
+			UploadID:  base64.RawURLEncoding.EncodeToString(fmt.Appendf(nil, "%s.%s", globalDeploymentID(), uploadID)),
 			Initiated: startTime,
 		})
 		populatedUploadIDs.Add(uploadID)
@@ -390,7 +390,13 @@ func (er erasureObjects) newMultipartUpload(ctx context.Context, bucket string, 
 		if err == nil && opts.CheckPrecondFn(obj) {
 			return nil, PreConditionFailed{}
 		}
-		if err != nil && !isErrVersionNotFound(err) && !isErrObjectNotFound(err) && !isErrReadQuorum(err) {
+		if err != nil && !isErrVersionNotFound(err) && !isErrObjectNotFound(err) {
+			return nil, err
+		}
+
+		// if object doesn't exist return error for If-Match conditional requests
+		// If-None-Match should be allowed to proceed for non-existent objects
+		if err != nil && opts.HasIfMatch && (isErrObjectNotFound(err) || isErrVersionNotFound(err)) {
 			return nil, err
 		}
 	}
@@ -498,7 +504,7 @@ func (er erasureObjects) newMultipartUpload(ctx context.Context, bucket string, 
 		partsMetadata[index].Metadata = userDefined
 	}
 	uploadUUID := fmt.Sprintf("%sx%d", mustGetUUID(), modTime.UnixNano())
-	uploadID := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%s.%s", globalDeploymentID(), uploadUUID)))
+	uploadID := base64.RawURLEncoding.EncodeToString(fmt.Appendf(nil, "%s.%s", globalDeploymentID(), uploadUUID))
 	uploadIDPath := er.getUploadIDDir(bucket, object, uploadUUID)
 
 	// Write updated `xl.meta` to all disks.
@@ -527,7 +533,7 @@ func (er erasureObjects) NewMultipartUpload(ctx context.Context, bucket, object 
 }
 
 // renamePart - renames multipart part to its relevant location under uploadID.
-func (er erasureObjects) renamePart(ctx context.Context, disks []StorageAPI, srcBucket, srcEntry, dstBucket, dstEntry string, optsMeta []byte, writeQuorum int) ([]StorageAPI, error) {
+func (er erasureObjects) renamePart(ctx context.Context, disks []StorageAPI, srcBucket, srcEntry, dstBucket, dstEntry string, optsMeta []byte, writeQuorum int, skipParent string) ([]StorageAPI, error) {
 	paths := []string{
 		dstEntry,
 		dstEntry + ".meta",
@@ -540,12 +546,11 @@ func (er erasureObjects) renamePart(ctx context.Context, disks []StorageAPI, src
 
 	// Rename file on all underlying storage disks.
 	for index := range disks {
-		index := index
 		g.Go(func() error {
 			if disks[index] == nil {
 				return errDiskNotFound
 			}
-			return disks[index].RenamePart(ctx, srcBucket, srcEntry, dstBucket, dstEntry, optsMeta)
+			return disks[index].RenamePart(ctx, srcBucket, srcEntry, dstBucket, dstEntry, optsMeta, skipParent)
 		}, index)
 	}
 
@@ -754,8 +759,11 @@ func (er erasureObjects) PutObjectPart(ctx context.Context, bucket, object, uplo
 	ctx = rlkctx.Context()
 	defer uploadIDRLock.RUnlock(rlkctx)
 
-	onlineDisks, err = er.renamePart(ctx, onlineDisks, minioMetaTmpBucket, tmpPartPath, minioMetaMultipartBucket, partPath, partFI, writeQuorum)
+	onlineDisks, err = er.renamePart(ctx, onlineDisks, minioMetaTmpBucket, tmpPartPath, minioMetaMultipartBucket, partPath, partFI, writeQuorum, uploadIDPath)
 	if err != nil {
+		if errors.Is(err, errUploadIDNotFound) {
+			return pi, toObjectErr(errUploadIDNotFound, bucket, object, uploadID)
+		}
 		if errors.Is(err, errFileNotFound) {
 			// An in-quorum errFileNotFound means that client stream
 			// prematurely closed and we do not find any xl.meta or
@@ -817,7 +825,6 @@ func (er erasureObjects) listParts(ctx context.Context, onlineDisks []StorageAPI
 	objectParts := make([][]string, len(onlineDisks))
 	// List uploaded parts from drives.
 	for index := range onlineDisks {
-		index := index
 		g.Go(func() (err error) {
 			if onlineDisks[index] == nil {
 				return errDiskNotFound
@@ -992,7 +999,6 @@ func readParts(ctx context.Context, disks []StorageAPI, bucket string, partMetaP
 	objectPartInfos := make([][]*ObjectPartInfo, len(disks))
 	// Rename file on all underlying storage disks.
 	for index := range disks {
-		index := index
 		g.Go(func() (err error) {
 			if disks[index] == nil {
 				return errDiskNotFound
@@ -1108,7 +1114,13 @@ func (er erasureObjects) CompleteMultipartUpload(ctx context.Context, bucket str
 		if err == nil && opts.CheckPrecondFn(obj) {
 			return ObjectInfo{}, PreConditionFailed{}
 		}
-		if err != nil && !isErrVersionNotFound(err) && !isErrObjectNotFound(err) && !isErrReadQuorum(err) {
+		if err != nil && !isErrVersionNotFound(err) && !isErrObjectNotFound(err) {
+			return ObjectInfo{}, err
+		}
+
+		// if object doesn't exist return error for If-Match conditional requests
+		// If-None-Match should be allowed to proceed for non-existent objects
+		if err != nil && opts.HasIfMatch && (isErrObjectNotFound(err) || isErrVersionNotFound(err)) {
 			return ObjectInfo{}, err
 		}
 	}
@@ -1158,6 +1170,7 @@ func (er erasureObjects) CompleteMultipartUpload(ctx context.Context, bucket str
 				Err:    fmt.Errorf("checksum type mismatch. got %q (%s) expected %q (%s)", checksumType.String(), checksumType.ObjType(), opts.WantChecksum.Type.String(), opts.WantChecksum.Type.ObjType()),
 			}
 		}
+		checksumType |= hash.ChecksumMultipart | hash.ChecksumIncludesMultipart
 	}
 
 	var checksumCombined []byte
@@ -1478,7 +1491,7 @@ func (er erasureObjects) CompleteMultipartUpload(ctx context.Context, bucket str
 		}
 	}
 
-	for i := 0; i < len(onlineDisks); i++ {
+	for i := range len(onlineDisks) {
 		if onlineDisks[i] != nil && onlineDisks[i].IsOnline() {
 			// Object info is the same in all disks, so we can pick
 			// the first meta from online disk
@@ -1506,17 +1519,10 @@ func (er erasureObjects) AbortMultipartUpload(ctx context.Context, bucket, objec
 		auditObjectErasureSet(ctx, "AbortMultipartUpload", object, &er)
 	}
 
-	// Validates if upload ID exists.
-	if _, _, err = er.checkUploadIDExists(ctx, bucket, object, uploadID, false); err != nil {
-		if errors.Is(err, errVolumeNotFound) {
-			return toObjectErr(err, bucket)
-		}
-		return toObjectErr(err, bucket, object, uploadID)
-	}
-
 	// Cleanup all uploaded parts.
-	er.deleteAll(ctx, minioMetaMultipartBucket, er.getUploadIDDir(bucket, object, uploadID))
+	defer er.deleteAll(ctx, minioMetaMultipartBucket, er.getUploadIDDir(bucket, object, uploadID))
 
-	// Successfully purged.
-	return nil
+	// Validates if upload ID exists.
+	_, _, err = er.checkUploadIDExists(ctx, bucket, object, uploadID, false)
+	return toObjectErr(err, bucket, object, uploadID)
 }

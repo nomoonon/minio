@@ -223,7 +223,11 @@ func (z *erasureServerPools) listPath(ctx context.Context, o *listPathOptions) (
 
 	go func(o listPathOptions) {
 		defer wg.Done()
-		o.StopDiskAtLimit = true
+		if o.Lifecycle == nil {
+			// No filtering ahead, ask drives to stop
+			// listing exactly at a specific limit.
+			o.StopDiskAtLimit = true
+		}
 		listErr = z.listMerged(listCtx, o, filterCh)
 		o.debugln("listMerged returned with", listErr)
 	}(*o)
@@ -335,7 +339,7 @@ func triggerExpiryAndRepl(ctx context.Context, o listPathOptions, obj metaCacheE
 	if !o.Versioned && !o.V1 {
 		fi, err := obj.fileInfo(o.Bucket)
 		if err != nil {
-			return
+			return skip
 		}
 		objInfo := fi.ToObjectInfo(o.Bucket, obj.name, versioned)
 		if o.Lifecycle != nil {
@@ -346,7 +350,7 @@ func triggerExpiryAndRepl(ctx context.Context, o listPathOptions, obj metaCacheE
 
 	fiv, err := obj.fileInfoVersions(o.Bucket)
 	if err != nil {
-		return
+		return skip
 	}
 
 	// Expire all versions if needed, if not attempt to queue for replication.
@@ -365,7 +369,7 @@ func triggerExpiryAndRepl(ctx context.Context, o listPathOptions, obj metaCacheE
 
 		queueReplicationHeal(ctx, o.Bucket, objInfo, o.Replication, 0)
 	}
-	return
+	return skip
 }
 
 func (z *erasureServerPools) listAndSave(ctx context.Context, o *listPathOptions) (entries metaCacheEntriesSorted, err error) {
@@ -422,6 +426,9 @@ func (z *erasureServerPools) listAndSave(ctx context.Context, o *listPathOptions
 	go func() {
 		var returned bool
 		for entry := range inCh {
+			if o.shouldSkip(ctx, entry) {
+				continue
+			}
 			if !returned {
 				funcReturnedMu.Lock()
 				returned = funcReturned

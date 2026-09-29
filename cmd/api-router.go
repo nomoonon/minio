@@ -218,6 +218,8 @@ func s3APIMiddleware(f http.HandlerFunc, flags ...s3HFlag) http.HandlerFunc {
 	handlerName := getHandlerName(f, "objectAPIHandlers")
 
 	var handler http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
+		w = &trackingResponseWriter{ResponseWriter: w}
+
 		// Wrap the actual handler with the appropriate tracing middleware.
 		var tracedHandler http.HandlerFunc
 		if handlerFlags.has(traceHdrsS3HFlag) {
@@ -386,6 +388,11 @@ func registerAPIRouter(router *mux.Router) {
 		router.Methods(http.MethodPut).Path("/{object:.+}").
 			HeadersRegexp(xhttp.AmzSnowballExtract, "true").
 			HandlerFunc(s3APIMiddleware(api.PutObjectExtractHandler, traceHdrsS3HFlag))
+
+		// AppendObject to be rejected
+		router.Methods(http.MethodPut).Path("/{object:.+}").
+			HeadersRegexp(xhttp.AmzWriteOffsetBytes, "").
+			HandlerFunc(s3APIMiddleware(errorResponseHandler))
 
 		// PutObject
 		router.Methods(http.MethodPut).Path("/{object:.+}").

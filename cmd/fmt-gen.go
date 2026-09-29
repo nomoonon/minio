@@ -98,8 +98,8 @@ func fmtGenMain(ctxt *cli.Context) {
 		setCount, setDriveCount := pool.SetCount, pool.DrivesPerSet
 		format := newFormatErasureV3(setCount, setDriveCount)
 		format.ID = deploymentID
-		for i := 0; i < setCount; i++ { // for each erasure set
-			for j := 0; j < setDriveCount; j++ {
+		for i := range setCount { // for each erasure set
+			for j := range setDriveCount {
 				newFormat := format.Clone()
 				newFormat.Erasure.This = format.Erasure.Sets[i][j]
 				if deploymentID != "" {

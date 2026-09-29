@@ -95,7 +95,7 @@ func (s *erasureSets) getDiskMap() map[Endpoint]StorageAPI {
 	s.erasureDisksMu.RLock()
 	defer s.erasureDisksMu.RUnlock()
 
-	for i := 0; i < s.setCount; i++ {
+	for i := range s.setCount {
 		for j := 0; j < s.setDriveCount; j++ {
 			disk := s.erasureDisks[i][j]
 			if disk == OfflineDisk {
@@ -150,7 +150,7 @@ func findDiskIndexByDiskID(refFormat *formatErasureV3, diskID string) (int, int,
 	if diskID == offlineDiskUUID {
 		return -1, -1, fmt.Errorf("DriveID: %s is offline", diskID)
 	}
-	for i := 0; i < len(refFormat.Erasure.Sets); i++ {
+	for i := range len(refFormat.Erasure.Sets) {
 		for j := 0; j < len(refFormat.Erasure.Sets[0]); j++ {
 			if refFormat.Erasure.Sets[i][j] == diskID {
 				return i, j, nil
@@ -174,7 +174,7 @@ func findDiskIndex(refFormat, format *formatErasureV3) (int, int, error) {
 		return -1, -1, fmt.Errorf("DriveID: %s is offline", format.Erasure.This)
 	}
 
-	for i := 0; i < len(refFormat.Erasure.Sets); i++ {
+	for i := range len(refFormat.Erasure.Sets) {
 		for j := 0; j < len(refFormat.Erasure.Sets[0]); j++ {
 			if refFormat.Erasure.Sets[i][j] == format.Erasure.This {
 				return i, j, nil
@@ -377,7 +377,7 @@ func newErasureSets(ctx context.Context, endpoints PoolEndpoints, storageDisks [
 
 	mutex := newNSLock(globalIsDistErasure)
 
-	for i := 0; i < setCount; i++ {
+	for i := range setCount {
 		s.erasureDisks[i] = make([]StorageAPI, setDriveCount)
 	}
 
@@ -390,9 +390,9 @@ func newErasureSets(ctx context.Context, endpoints PoolEndpoints, storageDisks [
 
 	var wg sync.WaitGroup
 	var lk sync.Mutex
-	for i := 0; i < setCount; i++ {
+	for i := range setCount {
 		lockerEpSet := set.NewStringSet()
-		for j := 0; j < setDriveCount; j++ {
+		for j := range setDriveCount {
 			wg.Add(1)
 			go func(i int, endpoint Endpoint) {
 				defer wg.Done()
@@ -409,13 +409,13 @@ func newErasureSets(ctx context.Context, endpoints PoolEndpoints, storageDisks [
 	}
 	wg.Wait()
 
-	for i := 0; i < setCount; i++ {
+	for i := range setCount {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 
 			var innerWg sync.WaitGroup
-			for j := 0; j < setDriveCount; j++ {
+			for j := range setDriveCount {
 				disk := storageDisks[i*setDriveCount+j]
 				if disk == nil {
 					continue
@@ -593,7 +593,6 @@ func (s *erasureSets) StorageInfo(ctx context.Context) StorageInfo {
 
 	g := errgroup.WithNErrs(len(s.sets))
 	for index := range s.sets {
-		index := index
 		g.Go(func() error {
 			storageInfos[index] = s.sets[index].StorageInfo(ctx)
 			return nil
@@ -618,7 +617,6 @@ func (s *erasureSets) LocalStorageInfo(ctx context.Context, metrics bool) Storag
 
 	g := errgroup.WithNErrs(len(s.sets))
 	for index := range s.sets {
-		index := index
 		g.Go(func() error {
 			storageInfos[index] = s.sets[index].LocalStorageInfo(ctx, metrics)
 			return nil
@@ -641,7 +639,6 @@ func (s *erasureSets) Shutdown(ctx context.Context) error {
 	g := errgroup.WithNErrs(len(s.sets))
 
 	for index := range s.sets {
-		index := index
 		g.Go(func() error {
 			return s.sets[index].Shutdown(ctx)
 		}, index)
@@ -705,7 +702,6 @@ func (s *erasureSets) getHashedSet(input string) (set *erasureObjects) {
 func listDeletedBuckets(ctx context.Context, storageDisks []StorageAPI, delBuckets *xsync.MapOf[string, VolInfo], readQuorum int) error {
 	g := errgroup.WithNErrs(len(storageDisks))
 	for index := range storageDisks {
-		index := index
 		g.Go(func() error {
 			if storageDisks[index] == nil {
 				// we ignore disk not found errors
@@ -868,11 +864,14 @@ func (s *erasureSets) CopyObject(ctx context.Context, srcBucket, srcObject, dstB
 	}
 
 	putOpts := ObjectOptions{
-		ServerSideEncryption: dstOpts.ServerSideEncryption,
-		UserDefined:          srcInfo.UserDefined,
-		Versioned:            dstOpts.Versioned,
-		VersionID:            dstOpts.VersionID,
-		MTime:                dstOpts.MTime,
+		ServerSideEncryption:       dstOpts.ServerSideEncryption,
+		UserDefined:                srcInfo.UserDefined,
+		Versioned:                  dstOpts.Versioned,
+		VersionID:                  dstOpts.VersionID,
+		MTime:                      dstOpts.MTime,
+		EncryptFn:                  dstOpts.EncryptFn,
+		WantChecksum:               dstOpts.WantChecksum,
+		WantServerSideChecksumType: dstOpts.WantServerSideChecksumType,
 	}
 
 	return dstSet.putObject(ctx, dstBucket, dstObject, srcInfo.PutObjReader, putOpts)

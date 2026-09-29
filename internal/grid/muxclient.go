@@ -574,7 +574,7 @@ func (m *muxClient) ack(seq uint32) {
 		return
 	}
 	available := cap(m.outBlock)
-	for i := 0; i < available; i++ {
+	for range available {
 		m.outBlock <- struct{}{}
 	}
 	m.acked = true
@@ -623,7 +623,7 @@ func (m *muxClient) addResponse(r Response) (ok bool) {
 	default:
 		if m.stateless {
 			// Drop message if not stateful.
-			return
+			return ok
 		}
 		err := errors.New("INTERNAL ERROR: Response was blocked")
 		gridLogIf(m.ctx, err)

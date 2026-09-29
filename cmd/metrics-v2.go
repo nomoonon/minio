@@ -20,6 +20,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"net/http"
 	"runtime"
@@ -319,7 +320,6 @@ type MetricDescription struct {
 	Name      MetricName      `json:"MetricName"`
 	Help      string          `json:"Help"`
 	Type      MetricTypeV2    `json:"Type"`
-	Buckets   []float64       `json:"Buckets,omitempty"`
 }
 
 // MetricV2 captures the details for a metric
@@ -432,15 +432,9 @@ func (m *MetricV2) clone() MetricV2 {
 		VariableLabels:       make(map[string]string, len(m.VariableLabels)),
 		Histogram:            make(map[string]uint64, len(m.Histogram)),
 	}
-	for k, v := range m.StaticLabels {
-		metric.StaticLabels[k] = v
-	}
-	for k, v := range m.VariableLabels {
-		metric.VariableLabels[k] = v
-	}
-	for k, v := range m.Histogram {
-		metric.Histogram[k] = v
-	}
+	maps.Copy(metric.StaticLabels, m.StaticLabels)
+	maps.Copy(metric.VariableLabels, m.VariableLabels)
+	maps.Copy(metric.Histogram, m.Histogram)
 	return metric
 }
 
@@ -1544,8 +1538,7 @@ func getS3TTFBDistributionMD() MetricDescription {
 		Subsystem: ttfbSubsystem,
 		Name:      ttfbDistribution,
 		Help:      "Distribution of time to first byte across API calls",
-		Type:      histogramMetric,
-		Buckets:   []float64{0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0},
+		Type:      gaugeMetric,
 	}
 }
 
@@ -1555,8 +1548,7 @@ func getBucketTTFBDistributionMD() MetricDescription {
 		Subsystem: ttfbSubsystem,
 		Name:      ttfbDistribution,
 		Help:      "Distribution of time to first byte across API calls per bucket",
-		Type:      histogramMetric,
-		Buckets:   []float64{0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0},
+		Type:      gaugeMetric,
 	}
 }
 
@@ -1712,7 +1704,7 @@ func getMinioProcMetrics() *MetricsGroupV2 {
 		p, err := procfs.Self()
 		if err != nil {
 			internalLogOnceIf(ctx, err, string(nodeMetricNamespace))
-			return
+			return metrics
 		}
 
 		openFDs, _ := p.FileDescriptorsLen()
@@ -1827,7 +1819,7 @@ func getMinioProcMetrics() *MetricsGroupV2 {
 					Value:       stat.CPUTime(),
 				})
 		}
-		return
+		return metrics
 	})
 	return mg
 }
@@ -1841,7 +1833,7 @@ func getGoMetrics() *MetricsGroupV2 {
 			Description: getMinIOGORoutineCountMD(),
 			Value:       float64(runtime.NumGoroutine()),
 		})
-		return
+		return metrics
 	})
 	return mg
 }
@@ -2495,10 +2487,7 @@ func getReplicationNodeMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 					"endpoint": ep,
 				},
 			}
-			dwntime := currDowntime
-			if health.offlineDuration > currDowntime {
-				dwntime = health.offlineDuration
-			}
+			dwntime := max(health.offlineDuration, currDowntime)
 			downtimeDuration.Value = float64(dwntime / time.Second)
 			ml = append(ml, downtimeDuration)
 		}
@@ -2643,7 +2632,7 @@ func getMinioVersionMetrics() *MetricsGroupV2 {
 			Description:    getMinIOVersionMD(),
 			VariableLabels: map[string]string{"version": Version},
 		})
-		return
+		return metrics
 	})
 	return mg
 }
@@ -2664,7 +2653,7 @@ func getNodeHealthMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 			Description: getNodeOfflineTotalMD(),
 			Value:       float64(nodesDown),
 		})
-		return
+		return metrics
 	})
 	return mg
 }
@@ -2677,11 +2666,11 @@ func getMinioHealingMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 	mg.RegisterRead(func(_ context.Context) (metrics []MetricV2) {
 		bgSeq, exists := globalBackgroundHealState.getHealSequenceByToken(bgHealingUUID)
 		if !exists {
-			return
+			return metrics
 		}
 
 		if bgSeq.lastHealActivity.IsZero() {
-			return
+			return metrics
 		}
 
 		metrics = make([]MetricV2, 0, 5)
@@ -2692,7 +2681,7 @@ func getMinioHealingMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 		metrics = append(metrics, getObjectsScanned(bgSeq)...)
 		metrics = append(metrics, getHealedItems(bgSeq)...)
 		metrics = append(metrics, getFailedItems(bgSeq)...)
-		return
+		return metrics
 	})
 	return mg
 }
@@ -2707,7 +2696,7 @@ func getFailedItems(seq *healSequence) (m []MetricV2) {
 			Value:          float64(v),
 		})
 	}
-	return
+	return m
 }
 
 func getHealedItems(seq *healSequence) (m []MetricV2) {
@@ -2720,7 +2709,7 @@ func getHealedItems(seq *healSequence) (m []MetricV2) {
 			Value:          float64(v),
 		})
 	}
-	return
+	return m
 }
 
 func getObjectsScanned(seq *healSequence) (m []MetricV2) {
@@ -2733,7 +2722,7 @@ func getObjectsScanned(seq *healSequence) (m []MetricV2) {
 			Value:          float64(v),
 		})
 	}
-	return
+	return m
 }
 
 func getDistLockMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
@@ -3041,7 +3030,7 @@ func getHTTPMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 					VariableLabels: map[string]string{"api": api},
 				})
 			}
-			return
+			return metrics
 		}
 
 		// If we have too many, limit them
@@ -3110,7 +3099,7 @@ func getHTTPMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 			}
 		}
 
-		return
+		return metrics
 	})
 	return mg
 }
@@ -3153,7 +3142,7 @@ func getNetworkMetrics() *MetricsGroupV2 {
 			Description: getS3ReceivedBytesMD(),
 			Value:       float64(connStats.s3InputBytes),
 		})
-		return
+		return metrics
 	})
 	return mg
 }
@@ -3166,19 +3155,19 @@ func getClusterUsageMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 	mg.RegisterRead(func(ctx context.Context) (metrics []MetricV2) {
 		objLayer := newObjectLayerFn()
 		if objLayer == nil {
-			return
+			return metrics
 		}
 
 		metrics = make([]MetricV2, 0, 50)
 		dataUsageInfo, err := loadDataUsageFromBackend(ctx, objLayer)
 		if err != nil {
 			metricsLogIf(ctx, err)
-			return
+			return metrics
 		}
 
 		// data usage has not captured any data yet.
 		if dataUsageInfo.LastUpdate.IsZero() {
-			return
+			return metrics
 		}
 
 		metrics = append(metrics, MetricV2{
@@ -3259,7 +3248,7 @@ func getClusterUsageMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 			Value:       float64(clusterBuckets),
 		})
 
-		return
+		return metrics
 	})
 	return mg
 }
@@ -3276,12 +3265,12 @@ func getBucketUsageMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 		dataUsageInfo, err := loadDataUsageFromBackend(ctx, objLayer)
 		if err != nil {
 			metricsLogIf(ctx, err)
-			return
+			return metrics
 		}
 
 		// data usage has not captured any data yet.
 		if dataUsageInfo.LastUpdate.IsZero() {
-			return
+			return metrics
 		}
 
 		metrics = append(metrics, MetricV2{
@@ -3465,7 +3454,7 @@ func getBucketUsageMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 				VariableLabels:       map[string]string{"bucket": bucket},
 			})
 		}
-		return
+		return metrics
 	})
 	return mg
 }
@@ -3509,17 +3498,17 @@ func getClusterTierMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 		objLayer := newObjectLayerFn()
 
 		if globalTierConfigMgr.Empty() {
-			return
+			return metrics
 		}
 
 		dui, err := loadDataUsageFromBackend(ctx, objLayer)
 		if err != nil {
 			metricsLogIf(ctx, err)
-			return
+			return metrics
 		}
 		// data usage has not captured any tier stats yet.
 		if dui.TierStats == nil {
-			return
+			return metrics
 		}
 
 		return dui.tierMetrics()
@@ -3625,7 +3614,7 @@ func getLocalStorageMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 			Value:       float64(storageInfo.Backend.RRSCParity),
 		})
 
-		return
+		return metrics
 	})
 	return mg
 }
@@ -3766,7 +3755,7 @@ func getClusterHealthMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 			})
 		}
 
-		return
+		return metrics
 	})
 
 	return mg
@@ -3787,7 +3776,7 @@ func getBatchJobsMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 		m.Merge(&mRemote)
 
 		if m.Aggregated.BatchJobs == nil {
-			return
+			return metrics
 		}
 
 		for _, mj := range m.Aggregated.BatchJobs.Jobs {
@@ -3833,7 +3822,7 @@ func getBatchJobsMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 				},
 			)
 		}
-		return
+		return metrics
 	})
 	return mg
 }
@@ -3886,7 +3875,7 @@ func getClusterStorageMetrics(opts MetricsGroupOpts) *MetricsGroupV2 {
 			Description: getClusterDrivesTotalMD(),
 			Value:       float64(totalDrives.Sum()),
 		})
-		return
+		return metrics
 	})
 	return mg
 }
@@ -4275,7 +4264,7 @@ func getOrderedLabelValueArrays(labelsWithValue map[string]string) (labels, valu
 		labels = append(labels, l)
 		values = append(values, v)
 	}
-	return
+	return labels, values
 }
 
 // newMinioCollectorNode describes the collector

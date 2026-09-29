@@ -295,7 +295,7 @@ func (fi FileInfo) ShallowCopy() (n FileInfo) {
 	n.VersionID = fi.VersionID
 	n.Deleted = fi.Deleted
 	n.Erasure = fi.Erasure
-	return
+	return n
 }
 
 // WriteQuorum returns expected write quorum for this FileInfo
@@ -508,6 +508,7 @@ type RenamePartHandlerParams struct {
 	DstVolume   string `msg:"dv"`
 	DstFilePath string `msg:"dp"`
 	Meta        []byte `msg:"m"`
+	SkipParent  string `msg:"kp"`
 }
 
 // ReadAllHandlerParams are parameters for ReadAllHandler.

@@ -24,7 +24,6 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/minio/minio/internal/fips"
 	"github.com/minio/minio/internal/ioutil"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/sio"
@@ -82,7 +81,7 @@ func Requested(h http.Header) bool {
 func (sse ssecCopy) UnsealObjectKey(h http.Header, metadata map[string]string, bucket, object string) (key ObjectKey, err error) {
 	clientKey, err := sse.ParseHTTP(h)
 	if err != nil {
-		return
+		return key, err
 	}
 	return unsealObjectKey(clientKey[:], metadata, bucket, object)
 }
@@ -92,16 +91,16 @@ func (sse ssecCopy) UnsealObjectKey(h http.Header, metadata map[string]string, b
 func unsealObjectKey(clientKey []byte, metadata map[string]string, bucket, object string) (key ObjectKey, err error) {
 	sealedKey, err := SSEC.ParseMetadata(metadata)
 	if err != nil {
-		return
+		return key, err
 	}
 	err = key.Unseal(clientKey, sealedKey, SSEC.String(), bucket, object)
-	return
+	return key, err
 }
 
 // EncryptSinglePart encrypts an io.Reader which must be the
 // body of a single-part PUT request.
 func EncryptSinglePart(r io.Reader, key ObjectKey) io.Reader {
-	r, err := sio.EncryptReader(r, sio.Config{MinVersion: sio.Version20, Key: key[:], CipherSuites: fips.DARECiphers()})
+	r, err := sio.EncryptReader(r, sio.Config{MinVersion: sio.Version20, Key: key[:]})
 	if err != nil {
 		logger.CriticalIf(context.Background(), errors.New("Unable to encrypt io.Reader using object key"))
 	}
@@ -123,7 +122,7 @@ func DecryptSinglePart(w io.Writer, offset, length int64, key ObjectKey) io.Writ
 	const PayloadSize = 1 << 16 // DARE 2.0
 	w = ioutil.LimitedWriter(w, offset%PayloadSize, length)
 
-	decWriter, err := sio.DecryptWriter(w, sio.Config{Key: key[:], CipherSuites: fips.DARECiphers()})
+	decWriter, err := sio.DecryptWriter(w, sio.Config{Key: key[:]})
 	if err != nil {
 		logger.CriticalIf(context.Background(), errors.New("Unable to decrypt io.Writer using object key"))
 	}

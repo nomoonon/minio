@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -64,7 +65,7 @@ func setCommonHeaders(w http.ResponseWriter) {
 }
 
 // Encodes the response headers into XML format.
-func encodeResponse(response interface{}) []byte {
+func encodeResponse(response any) []byte {
 	var buf bytes.Buffer
 	buf.WriteString(xml.Header)
 	if err := xml.NewEncoder(&buf).Encode(response); err != nil {
@@ -82,7 +83,7 @@ func encodeResponse(response interface{}) []byte {
 // Do not use this function for anything other than ListObjects()
 // variants, please open a github discussion if you wish to use
 // this in other places.
-func encodeResponseList(response interface{}) []byte {
+func encodeResponseList(response any) []byte {
 	var buf bytes.Buffer
 	buf.WriteString(xxml.Header)
 	if err := xxml.NewEncoder(&buf).Encode(response); err != nil {
@@ -93,7 +94,7 @@ func encodeResponseList(response interface{}) []byte {
 }
 
 // Encodes the response headers into JSON format.
-func encodeResponseJSON(response interface{}) []byte {
+func encodeResponseJSON(response any) []byte {
 	var bytesBuffer bytes.Buffer
 	e := json.NewEncoder(&bytesBuffer)
 	e.Encode(response)
@@ -168,6 +169,32 @@ func setObjectHeaders(ctx context.Context, w http.ResponseWriter, objInfo Object
 			if !stringsHasPrefixFold(k, userMetadataPrefix) {
 				continue
 			}
+			// check the doc https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html
+			// For metadata values like "ö", "ÄMÄZÕÑ S3", and "öha, das sollte eigentlich
+			// funktionieren", tested against a real AWS S3 bucket, S3 may encode incorrectly. For
+			// example, "ö" was encoded as =?UTF-8?B?w4PCtg==?=, producing invalid UTF-8 instead
+			// of =?UTF-8?B?w7Y=?=. This mirrors errors like the ä½ in another string.
+			//
+			// S3 uses B-encoding (Base64) for non-ASCII-heavy metadata and Q-encoding
+			// (quoted-printable) for mostly ASCII strings. Long strings are split at word
+			// boundaries to fit RFC 2047’s 75-character limit, ensuring HTTP parser
+			// compatibility.
+			//
+			// However, this splitting increases header size and can introduce errors, unlike Go’s
+			// mime package in MinIO, which correctly encodes strings with fixed B/Q encodings,
+			// avoiding S3’s heuristic-driven issues.
+			//
+			// For MinIO developers, decode S3 metadata with mime.WordDecoder, validate outputs,
+			// report encoding bugs to AWS, and use ASCII-only metadata to ensure reliable S3 API
+			// compatibility.
+			if needsMimeEncoding(v) {
+				// see https://github.com/golang/go/blob/release-branch.go1.24/src/net/mail/message.go#L325
+				if strings.ContainsAny(v, "\"#$%&'(),.:;<>@[]^`{|}~") {
+					v = mime.BEncoding.Encode("UTF-8", v)
+				} else {
+					v = mime.QEncoding.Encode("UTF-8", v)
+				}
+			}
 			w.Header()[strings.ToLower(k)] = []string{v}
 			isSet = true
 			break
@@ -228,4 +255,15 @@ func setObjectHeaders(ctx context.Context, w http.ResponseWriter, objInfo Object
 	}
 
 	return nil
+}
+
+// needsEncoding reports whether s contains any bytes that need to be encoded.
+// see mime.needsEncoding
+func needsMimeEncoding(s string) bool {
+	for _, b := range s {
+		if (b < ' ' || b > '~') && b != '\t' {
+			return true
+		}
+	}
+	return false
 }

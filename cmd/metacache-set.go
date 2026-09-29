@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -162,16 +163,41 @@ func (o listPathOptions) newMetacache() metacache {
 	}
 }
 
-func (o *listPathOptions) debugf(format string, data ...interface{}) {
+func (o *listPathOptions) debugf(format string, data ...any) {
 	if serverDebugLog {
 		console.Debugf(format+"\n", data...)
 	}
 }
 
-func (o *listPathOptions) debugln(data ...interface{}) {
+func (o *listPathOptions) debugln(data ...any) {
 	if serverDebugLog {
 		console.Debugln(data...)
 	}
+}
+
+func (o *listPathOptions) shouldSkip(ctx context.Context, entry metaCacheEntry) (yes bool) {
+	if !o.IncludeDirectories && (entry.isDir() || (!o.Versioned && entry.isObjectDir() && entry.isLatestDeletemarker())) {
+		return true
+	}
+	if o.Marker != "" && entry.name < o.Marker {
+		return true
+	}
+	if !strings.HasPrefix(entry.name, o.Prefix) {
+		return true
+	}
+	if o.Separator != "" && entry.isDir() && !strings.Contains(strings.TrimPrefix(entry.name, o.Prefix), o.Separator) {
+		return true
+	}
+	if !o.Recursive && !entry.isInDir(o.Prefix, o.Separator) {
+		return true
+	}
+	if !o.InclDeleted && entry.isObject() && entry.isLatestDeletemarker() && !entry.isObjectDir() {
+		return true
+	}
+	if o.Lifecycle != nil || o.Replication.Config != nil {
+		return triggerExpiryAndRepl(ctx, *o, entry)
+	}
+	return false
 }
 
 // gatherResults will collect all results on the input channel and filter results according
@@ -199,26 +225,12 @@ func (o *listPathOptions) gatherResults(ctx context.Context, in <-chan metaCache
 				resCh = nil
 				continue
 			}
-			if !o.IncludeDirectories && (entry.isDir() || (!o.Versioned && entry.isObjectDir() && entry.isLatestDeletemarker())) {
-				continue
-			}
-			if o.Marker != "" && entry.name < o.Marker {
-				continue
-			}
-			if !strings.HasPrefix(entry.name, o.Prefix) {
-				continue
-			}
-			if !o.Recursive && !entry.isInDir(o.Prefix, o.Separator) {
-				continue
-			}
-			if !o.InclDeleted && entry.isObject() && entry.isLatestDeletemarker() && !entry.isObjectDir() {
-				continue
-			}
-			if o.Lifecycle != nil || o.Replication.Config != nil {
-				if skipped := triggerExpiryAndRepl(ctx, *o, entry); skipped {
+			if yes := o.shouldSkip(ctx, entry); yes {
+				// when we have not enough results, record the skipped entry
+				if o.Limit > 0 && results.len() < o.Limit {
 					results.lastSkippedEntry = entry.name
-					continue
 				}
+				continue
 			}
 			if o.Limit > 0 && results.len() >= o.Limit {
 				// We have enough and we have more.
@@ -641,7 +653,7 @@ func calcCommonWritesDeletes(infos []DiskInfo, readQuorum int) (commonWrite, com
 
 	commonWrite = filter(writes)
 	commonDelete = filter(deletes)
-	return
+	return commonWrite, commonDelete
 }
 
 func calcCommonCounter(infos []DiskInfo, readQuorum int) (commonCount uint64) {
@@ -895,9 +907,7 @@ func (er *erasureObjects) saveMetaCacheStream(ctx context.Context, mc *metaCache
 			fi := FileInfo{
 				Metadata: make(map[string]string, len(meta)),
 			}
-			for k, v := range meta {
-				fi.Metadata[k] = v
-			}
+			maps.Copy(fi.Metadata, meta)
 			err := er.updateObjectMetaWithOpts(ctx, minioMetaBucket, o.objectPath(0), fi, er.getDisks(), UpdateMetadataOpts{NoPersistence: true})
 			if err == nil {
 				break
